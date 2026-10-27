@@ -1,0 +1,425 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CRM Voice Agent</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --card: #1e293b;
+      --accent: #38bdf8;
+      --accent-active: #0ea5e9;
+      --text: #f8fafc;
+      --muted: #94a3b8;
+      --danger: #ef4444;
+      --success: #22c55e;
+    }
+    body {
+      margin: 0;
+      padding: 0;
+      background-color: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+    }
+    .container {
+      background: var(--card);
+      border-radius: 16px;
+      padding: 32px;
+      width: 100%;
+      max-width: 480px;
+      box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.5);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 20px;
+    }
+    h1 { font-size: 1.5rem; margin: 0; font-weight: 600; }
+    .status-badge {
+      font-size: 0.85rem;
+      padding: 4px 12px;
+      border-radius: 9999px;
+      background: rgba(148, 163, 184, 0.2);
+      color: var(--muted);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+    .connected .status-dot { background: var(--success); }
+    .connected { color: var(--success); background: rgba(34, 197, 94, 0.15); }
+
+    .mic-btn {
+      width: 110px;
+      height: 110px;
+      border-radius: 50%;
+      border: none;
+      background: var(--accent);
+      color: #0f172a;
+      cursor: pointer;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      font-weight: 600;
+      font-size: 1rem;
+      transition: all 0.2s ease;
+      box-shadow: 0 0 20px rgba(56, 189, 248, 0.3);
+    }
+    .mic-btn:hover { background: var(--accent-active); transform: scale(1.03); }
+    .mic-btn:disabled { opacity: 0.6; cursor: wait; transform: none; }
+    .mic-btn.active {
+      background: var(--danger);
+      color: #fff;
+      box-shadow: 0 0 25px rgba(239, 68, 68, 0.5);
+    }
+    .config-field { width: 100%; display: flex; flex-direction: column; gap: 6px; }
+    .config-field label { font-size: 0.75rem; color: var(--muted); text-transform: uppercase; }
+    .config-field input {
+      background: rgba(15, 23, 42, 0.6);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 8px;
+      padding: 10px 12px;
+      color: var(--text);
+      font-size: 0.9rem;
+      outline: none;
+    }
+    #transcript {
+      width: 100%;
+      box-sizing: border-box;
+      max-height: 180px;
+      overflow-y: auto;
+      font-size: 0.85rem;
+      line-height: 1.5;
+      display: none;
+      background: rgba(15, 23, 42, 0.6);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 8px;
+      padding: 10px 12px;
+    }
+    #transcript .user { color: var(--accent); }
+    #transcript .assistant { color: var(--text); }
+    #errorBox {
+      display: none;
+      width: 100%;
+      box-sizing: border-box;
+      background: rgba(239, 68, 68, 0.15);
+      border: 1px solid var(--danger);
+      color: #fca5a5;
+      padding: 12px;
+      border-radius: 8px;
+      font-size: 0.85rem;
+      font-family: monospace;
+      word-break: break-word;
+    }
+  </style>
+</head>
+<body>
+
+  <div class="container">
+    <h1>CRM Voice Assistant</h1>
+
+    <div id="statusBadge" class="status-badge">
+      <div class="status-dot"></div>
+      <span id="statusText">Disconnected</span>
+    </div>
+
+    <div id="errorBox"></div>
+
+    <div id="transcript"></div>
+
+    <div class="config-field">
+      <label for="wsUrlInput">Backend WebSocket Gateway URL</label>
+      <input type="text" id="wsUrlInput" value="ws://localhost:8000/ws/voice-crm" />
+    </div>
+
+    <button id="toggleBtn" class="mic-btn">Start</button>
+
+    <div style="font-size:0.85rem; color:var(--muted); text-align:center;">
+      Tap <strong>Start</strong>, allow your mic, and ask your question.
+    </div>
+  </div>
+
+  <script>
+    // Inline AudioWorklet processor: float32 mic samples -> 16-bit PCM chunks
+    const pcmProcessorCode = `
+      class PcmProcessor extends AudioWorkletProcessor {
+        constructor() {
+          super();
+          this.bufferSize = 2048;
+          this.buffer = new Int16Array(this.bufferSize);
+          this.bufferIndex = 0;
+        }
+        process(inputs) {
+          const input = inputs[0];
+          if (!input || !input[0]) return true;
+          const channel = input[0];
+
+          for (let i = 0; i < channel.length; i++) {
+            const s = Math.max(-1, Math.min(1, channel[i]));
+            this.buffer[this.bufferIndex++] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+
+            if (this.bufferIndex >= this.bufferSize) {
+              this.port.postMessage(this.buffer.buffer, [this.buffer.buffer]);
+              this.buffer = new Int16Array(this.bufferSize);
+              this.bufferIndex = 0;
+            }
+          }
+          return true;
+        }
+      }
+      registerProcessor('pcm-processor', PcmProcessor);
+    `;
+
+    const toggleBtn = document.getElementById("toggleBtn");
+    const statusBadge = document.getElementById("statusBadge");
+    const statusText = document.getElementById("statusText");
+    const wsUrlInput = document.getElementById("wsUrlInput");
+    const errorBox = document.getElementById("errorBox");
+
+    let ws = null;
+    let inputAudioCtx = null;
+    let outputAudioCtx = null;
+    let micStream = null;
+    let micSource = null;
+    let workletNode = null;
+    let isConnected = false;
+    let isStarting = false;
+    let scheduledAudioTime = 0;
+    const activeSources = new Set();
+
+    function showError(msg) {
+      errorBox.style.display = "block";
+      errorBox.innerText = `Error: ${msg}`;
+    }
+
+    function clearError() {
+      errorBox.style.display = "none";
+      errorBox.innerText = "";
+    }
+
+    const transcriptBox = document.getElementById("transcript");
+    let lastTranscriptRole = null;
+    let lastTranscriptEl = null;
+
+    // Transcript chunks arrive in pieces: append to the current line while the speaker is unchanged
+    function addTranscript(role, text) {
+      transcriptBox.style.display = "block";
+      if (role !== lastTranscriptRole || !lastTranscriptEl) {
+        lastTranscriptEl = document.createElement("div");
+        lastTranscriptEl.className = role;
+        lastTranscriptEl.textContent = (role === "user" ? "You: " : "Assistant: ");
+        transcriptBox.appendChild(lastTranscriptEl);
+        lastTranscriptRole = role;
+      }
+      lastTranscriptEl.textContent += text;
+      transcriptBox.scrollTop = transcriptBox.scrollHeight;
+    }
+
+    function setStatus(text, connected) {
+      statusText.innerText = text;
+      statusBadge.classList.toggle("connected", !!connected);
+    }
+
+    toggleBtn.onclick = async () => {
+      if (isStarting) return;
+      clearError();
+      if (!isConnected && !ws) {
+        await startAll();
+      } else {
+        stopAll();
+      }
+    };
+
+    async function startAll() {
+      const url = wsUrlInput.value.trim();
+      isStarting = true;
+      toggleBtn.disabled = true;
+      setStatus("Requesting mic & connecting...", false);
+
+      try {
+        // 1. Audio contexts (16 kHz in, 24 kHz out)
+        const AC = window.AudioContext || window.webkitAudioContext;
+        inputAudioCtx = new AC({ sampleRate: 16000 });
+        outputAudioCtx = new AC({ sampleRate: 24000 });
+        await inputAudioCtx.resume();
+        await outputAudioCtx.resume();
+        console.log("Input sample rate:", inputAudioCtx.sampleRate, "Output sample rate:", outputAudioCtx.sampleRate);
+        if (inputAudioCtx.sampleRate !== 16000) {
+          // Audio would be sent at the wrong speed/pitch and Gemini would not understand it
+          showError(`Your browser ignored the 16 kHz request (got ${inputAudioCtx.sampleRate} Hz). Use Chrome/Edge.`);
+        }
+
+        // 2. Load the worklet from a Blob
+        const blob = new Blob([pcmProcessorCode], { type: "application/javascript" });
+        const workletUrl = URL.createObjectURL(blob);
+        await inputAudioCtx.audioWorklet.addModule(workletUrl);
+        URL.revokeObjectURL(workletUrl);
+
+        // 3. Microphone
+        micStream = await navigator.mediaDevices.getUserMedia({
+          audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true }
+        });
+
+        // 4. WebSocket
+        const socket = new WebSocket(url);
+        ws = socket;
+
+        socket.onopen = () => {
+          if (socket !== ws) return;
+          isConnected = true;
+          setStatus("Live & Listening", true);
+          toggleBtn.innerText = "Stop";
+          toggleBtn.classList.add("active");
+          startAudioWorkletStreaming();
+        };
+
+        socket.onmessage = (event) => {
+          if (socket !== ws) return;
+          let data;
+          try {
+            data = JSON.parse(event.data);
+          } catch (e) {
+            console.warn("Parse error:", e);
+            return;
+          }
+          if (data.type === "error") {
+            showError(data.message);
+            stopAll();
+          } else if (data.type === "audio_delta" && data.audio) {
+            playPcm24k(data.audio);
+          } else if (data.type === "interrupted") {
+            flushAudio();
+          } else if (data.type === "transcript") {
+            addTranscript(data.role, data.text);
+          }
+        };
+
+        socket.onerror = () => {
+          if (socket !== ws) return;
+          showError(`WebSocket connection failed. Check that the backend is running at ${url}.`);
+        };
+
+        socket.onclose = (e) => {
+          if (socket !== ws) return; // we closed it ourselves (Stop button) or it's stale
+          if (e.code === 1008) {
+            showError("Access Denied (1008): GEMINI_API_KEY invalid or missing.");
+          } else if (e.code !== 1000 && e.code !== 1005 && errorBox.style.display === "none") {
+            showError(`WebSocket closed unexpectedly (Code: ${e.code}${e.reason ? ", " + e.reason : ""})`);
+          }
+          stopAll();
+        };
+      } catch (err) {
+        showError(err.message || String(err));
+        stopAll();
+      } finally {
+        isStarting = false;
+        toggleBtn.disabled = false;
+      }
+    }
+
+    function startAudioWorkletStreaming() {
+      if (!inputAudioCtx || inputAudioCtx.state === "closed" || !micStream) return;
+
+      micSource = inputAudioCtx.createMediaStreamSource(micStream);
+      workletNode = new AudioWorkletNode(inputAudioCtx, "pcm-processor");
+
+      workletNode.port.onmessage = (e) => {
+        if (!ws || ws.readyState !== WebSocket.OPEN) return;
+
+        const bytes = new Uint8Array(e.data);
+        let binary = "";
+        for (let i = 0; i < bytes.byteLength; i++) {
+          binary += String.fromCharCode(bytes[i]);
+        }
+        ws.send(JSON.stringify({ type: "audio_input", audio: btoa(binary) }));
+      };
+
+      micSource.connect(workletNode);
+      // Keep the worklet pulled by the graph without playing the mic back
+      const muteGain = inputAudioCtx.createGain();
+      muteGain.gain.value = 0;
+      workletNode.connect(muteGain);
+      muteGain.connect(inputAudioCtx.destination);
+    }
+
+    function playPcm24k(base64Pcm) {
+      if (!outputAudioCtx || outputAudioCtx.state === "closed") return;
+
+      const binary = atob(base64Pcm);
+      const len = binary.length - (binary.length % 2); // Int16 needs an even byte count
+      if (len === 0) return;
+      const bytes = new Uint8Array(len);
+      for (let i = 0; i < len; i++) bytes[i] = binary.charCodeAt(i);
+
+      const int16 = new Int16Array(bytes.buffer);
+      const float32 = new Float32Array(int16.length);
+      for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768.0;
+
+      const buffer = outputAudioCtx.createBuffer(1, float32.length, 24000);
+      buffer.copyToChannel(float32, 0);
+
+      const src = outputAudioCtx.createBufferSource();
+      src.buffer = buffer;
+      src.connect(outputAudioCtx.destination);
+
+      const start = Math.max(outputAudioCtx.currentTime, scheduledAudioTime);
+      src.start(start);
+      scheduledAudioTime = start + buffer.duration;
+
+      activeSources.add(src);
+      src.onended = () => activeSources.delete(src);
+    }
+
+    function flushAudio() {
+      activeSources.forEach((s) => {
+        try { s.stop(); } catch (_) {}
+      });
+      activeSources.clear();
+      if (outputAudioCtx && outputAudioCtx.state !== "closed") {
+        scheduledAudioTime = outputAudioCtx.currentTime;
+      }
+    }
+
+    function stopAll() {
+      isConnected = false;
+      setStatus("Disconnected", false);
+      toggleBtn.innerText = "Start";
+      toggleBtn.classList.remove("active");
+
+      // Detach ws first so its onclose handler ignores our own close()
+      const socket = ws;
+      ws = null;
+      if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
+        try { socket.close(1000); } catch (_) {}
+      }
+
+      if (workletNode) {
+        workletNode.port.onmessage = null;
+        try { workletNode.disconnect(); } catch (_) {}
+        workletNode = null;
+      }
+      if (micSource) {
+        try { micSource.disconnect(); } catch (_) {}
+        micSource = null;
+      }
+      if (micStream) {
+        micStream.getTracks().forEach((t) => t.stop());
+        micStream = null;
+      }
+
+      flushAudio();
+      scheduledAudioTime = 0;
+
+      if (inputAudioCtx && inputAudioCtx.state !== "closed") inputAudioCtx.close();
+      if (outputAudioCtx && outputAudioCtx.state !== "closed") outputAudioCtx.close();
+      inputAudioCtx = null;
+      outputAudioCtx = null;
+    }
+  </script>
+</body>
+</html>
