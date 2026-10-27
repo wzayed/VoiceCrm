@@ -1,4 +1,0 @@
-
-
-(Invoke-RestMethod "https://generativelanguage.googleapis.com/v1beta/models?key=AIzaSyA9BjAA3dTl9tftHBqcOjl-b4Tb6wS3GDA").models | Select-Object name, supportedGenerationMethods
-(Invoke-RestMethod "https://generativelanguage.googleapis.com/v1beta/models?pageSize=100&key=AIzaSyA9BjAA3dTl9tftHBqcOjl-b4Tb6wS3GDA").models |  Where-Object { $_.name -match "live|audio" -or $_.supportedGenerationMethods -contains "bidiGenerateContent" } |  Select-Object name, supportedGenerationMethods
