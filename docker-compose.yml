@@ -8,6 +8,7 @@ services:
     environment:
       - GEMINI_API_KEY=${GEMINI_API_KEY}
       - GEMINI_MODEL=${GEMINI_MODEL:-models/gemini-3.8-live}
+      - USE_REALTIME_TEXT=${USE_REALTIME_TEXT:-0}
     expose:
       - "8000"
     networks:
