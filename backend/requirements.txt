@@ -1,0 +1,6 @@
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+websockets==14.1
+langchain-core==0.3.30
+langchain-google-genai==2.0.8
+pydantic==2.10.5
