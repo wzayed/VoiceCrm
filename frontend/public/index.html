@@ -135,7 +135,6 @@
   <script>
     const wsUrlInput = document.getElementById("wsUrlInput");
 
-    // Automatically select the right WebSocket gateway for production vs local dev
     const isSecure = window.location.protocol === "https:";
     const wsProto = isSecure ? "wss:" : "ws:";
     if (window.location.hostname === "localhost" && window.location.port === "3000") {
@@ -143,35 +142,6 @@
     } else {
       wsUrlInput.value = `${wsProto}//${window.location.host}/ws/voice-crm`;
     }
-
-    const pcmProcessorCode = `
-      class PcmProcessor extends AudioWorkletProcessor {
-        constructor() {
-          super();
-          this.bufferSize = 2048;
-          this.buffer = new Int16Array(this.bufferSize);
-          this.bufferIndex = 0;
-        }
-        process(inputs) {
-          const input = inputs[0];
-          if (!input || !input[0]) return true;
-          const channel = input[0];
-
-          for (let i = 0; i < channel.length; i++) {
-            const s = Math.max(-1, Math.min(1, channel[i]));
-            this.buffer[this.bufferIndex++] = s < 0 ? s * 0x8000 : s * 0x7FFF;
-
-            if (this.bufferIndex >= this.bufferSize) {
-              this.port.postMessage(this.buffer.buffer, [this.buffer.buffer]);
-              this.buffer = new Int16Array(this.bufferSize);
-              this.bufferIndex = 0;
-            }
-          }
-          return true;
-        }
-      }
-      registerProcessor('pcm-processor', PcmProcessor);
-    `;
 
     const toggleBtn = document.getElementById("toggleBtn");
     const statusBadge = document.getElementById("statusBadge");
@@ -190,6 +160,7 @@
     function showError(msg) {
       errorBox.style.display = "block";
       errorBox.innerText = `Error: ${msg}`;
+      console.error("UI Error:", msg);
     }
 
     function clearError() {
@@ -211,21 +182,22 @@
       statusText.innerText = "Requesting mic & connecting...";
 
       try {
+        // 1. Create AudioContexts
         inputAudioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
         outputAudioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
 
         if (inputAudioCtx.state === 'suspended') await inputAudioCtx.resume();
         if (outputAudioCtx.state === 'suspended') await outputAudioCtx.resume();
 
-        const blob = new Blob([pcmProcessorCode], { type: "application/javascript" });
-        const workletUrl = URL.createObjectURL(blob);
-        await inputAudioCtx.audioWorklet.addModule(workletUrl);
-        URL.revokeObjectURL(workletUrl);
+        // 2. Load static AudioWorklet processor from same-origin file
+        await inputAudioCtx.audioWorklet.addModule("/pcm-processor.js");
 
+        // 3. Request microphone access
         micStream = await navigator.mediaDevices.getUserMedia({
           audio: { channelCount: 1, sampleRate: 16000, echoCancellation: true, noiseSuppression: true }
         });
 
+        // 4. Open WebSocket connection
         ws = new WebSocket(url);
 
         ws.onopen = () => {
@@ -254,12 +226,13 @@
           }
         };
 
-        ws.onerror = () => {
-          showError(`WebSocket connection failed. Verify backend gateway on ${url}.`);
+        ws.onerror = (e) => {
+          showError(`WebSocket connection error on ${url}.`);
           stopAll();
         };
 
         ws.onclose = (e) => {
+          console.warn("WebSocket closed:", e.code, e.reason);
           if (e.code === 1008) {
             showError("Access Denied (1008): GEMINI_API_KEY invalid or missing.");
           } else if (e.code !== 1000 && e.code !== 1005) {
