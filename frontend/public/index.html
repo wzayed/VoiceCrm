@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>CRM Voice Agent</title>
+  <title>FlowBridge Advisory | CRM Voice Agent</title>
   <style>
     :root {
       --bg: #0f172a;
@@ -40,6 +40,7 @@
       gap: 20px;
     }
     h1 { font-size: 1.5rem; margin: 0; font-weight: 600; }
+    .subtitle { font-size: 0.8rem; color: var(--muted); margin-top: -12px; }
     .status-badge {
       font-size: 0.85rem;
       padding: 4px 12px;
@@ -50,7 +51,12 @@
       align-items: center;
       gap: 6px;
     }
-    .status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--muted);
+    }
     .connected .status-dot { background: var(--success); }
     .connected { color: var(--success); background: rgba(34, 197, 94, 0.15); }
 
@@ -71,7 +77,6 @@
       box-shadow: 0 0 20px rgba(56, 189, 248, 0.3);
     }
     .mic-btn:hover { background: var(--accent-active); transform: scale(1.03); }
-    .mic-btn:disabled { opacity: 0.6; cursor: wait; transform: none; }
     .mic-btn.active {
       background: var(--danger);
       color: #fff;
@@ -88,25 +93,9 @@
       font-size: 0.9rem;
       outline: none;
     }
-    #transcript {
-      width: 100%;
-      box-sizing: border-box;
-      max-height: 180px;
-      overflow-y: auto;
-      font-size: 0.85rem;
-      line-height: 1.5;
-      display: none;
-      background: rgba(15, 23, 42, 0.6);
-      border: 1px solid rgba(255, 255, 255, 0.08);
-      border-radius: 8px;
-      padding: 10px 12px;
-    }
-    #transcript .user { color: var(--accent); }
-    #transcript .assistant { color: var(--text); }
     #errorBox {
       display: none;
       width: 100%;
-      box-sizing: border-box;
       background: rgba(239, 68, 68, 0.15);
       border: 1px solid var(--danger);
       color: #fca5a5;
@@ -114,7 +103,7 @@
       border-radius: 8px;
       font-size: 0.85rem;
       font-family: monospace;
-      word-break: break-word;
+      word-break: break-all;
     }
   </style>
 </head>
@@ -122,7 +111,8 @@
 
   <div class="container">
     <h1>CRM Voice Assistant</h1>
-
+    <div class="subtitle">FlowBridge Advisory — Friction to Flow</div>
+    
     <div id="statusBadge" class="status-badge">
       <div class="status-dot"></div>
       <span id="statusText">Disconnected</span>
@@ -130,22 +120,30 @@
 
     <div id="errorBox"></div>
 
-    <div id="transcript"></div>
-
     <div class="config-field">
-      <label for="wsUrlInput">Backend WebSocket Gateway URL</label>
-      <input type="text" id="wsUrlInput" value="ws://localhost:8000/ws/voice-crm" />
+      <label>Backend WebSocket Gateway URL</label>
+      <input type="text" id="wsUrlInput" />
     </div>
 
     <button id="toggleBtn" class="mic-btn">Start</button>
 
     <div style="font-size:0.85rem; color:var(--muted); text-align:center;">
-      Tap <strong>Start</strong>, allow your mic, and ask your question.
+      Tap <strong>Start</strong>, allow your mic, and speak in Arabic or English.
     </div>
   </div>
 
   <script>
-    // Inline AudioWorklet processor: float32 mic samples -> 16-bit PCM chunks
+    const wsUrlInput = document.getElementById("wsUrlInput");
+
+    // Automatically select the right WebSocket gateway for production vs local dev
+    const isSecure = window.location.protocol === "https:";
+    const wsProto = isSecure ? "wss:" : "ws:";
+    if (window.location.hostname === "localhost" && window.location.port === "3000") {
+      wsUrlInput.value = "ws://localhost:8000/ws/voice-crm";
+    } else {
+      wsUrlInput.value = `${wsProto}//${window.location.host}/ws/voice-crm`;
+    }
+
     const pcmProcessorCode = `
       class PcmProcessor extends AudioWorkletProcessor {
         constructor() {
@@ -178,17 +176,14 @@
     const toggleBtn = document.getElementById("toggleBtn");
     const statusBadge = document.getElementById("statusBadge");
     const statusText = document.getElementById("statusText");
-    const wsUrlInput = document.getElementById("wsUrlInput");
     const errorBox = document.getElementById("errorBox");
 
     let ws = null;
     let inputAudioCtx = null;
     let outputAudioCtx = null;
     let micStream = null;
-    let micSource = null;
     let workletNode = null;
     let isConnected = false;
-    let isStarting = false;
     let scheduledAudioTime = 0;
     const activeSources = new Set();
 
@@ -202,33 +197,9 @@
       errorBox.innerText = "";
     }
 
-    const transcriptBox = document.getElementById("transcript");
-    let lastTranscriptRole = null;
-    let lastTranscriptEl = null;
-
-    // Transcript chunks arrive in pieces: append to the current line while the speaker is unchanged
-    function addTranscript(role, text) {
-      transcriptBox.style.display = "block";
-      if (role !== lastTranscriptRole || !lastTranscriptEl) {
-        lastTranscriptEl = document.createElement("div");
-        lastTranscriptEl.className = role;
-        lastTranscriptEl.textContent = (role === "user" ? "You: " : "Assistant: ");
-        transcriptBox.appendChild(lastTranscriptEl);
-        lastTranscriptRole = role;
-      }
-      lastTranscriptEl.textContent += text;
-      transcriptBox.scrollTop = transcriptBox.scrollHeight;
-    }
-
-    function setStatus(text, connected) {
-      statusText.innerText = text;
-      statusBadge.classList.toggle("connected", !!connected);
-    }
-
     toggleBtn.onclick = async () => {
-      if (isStarting) return;
       clearError();
-      if (!isConnected && !ws) {
+      if (!isConnected) {
         await startAll();
       } else {
         stopAll();
@@ -237,110 +208,95 @@
 
     async function startAll() {
       const url = wsUrlInput.value.trim();
-      isStarting = true;
-      toggleBtn.disabled = true;
-      setStatus("Requesting mic & connecting...", false);
+      statusText.innerText = "Requesting mic & connecting...";
 
       try {
-        // 1. Audio contexts (16 kHz in, 24 kHz out)
-        const AC = window.AudioContext || window.webkitAudioContext;
-        inputAudioCtx = new AC({ sampleRate: 16000 });
-        outputAudioCtx = new AC({ sampleRate: 24000 });
-        await inputAudioCtx.resume();
-        await outputAudioCtx.resume();
-        console.log("Input sample rate:", inputAudioCtx.sampleRate, "Output sample rate:", outputAudioCtx.sampleRate);
-        if (inputAudioCtx.sampleRate !== 16000) {
-          // Audio would be sent at the wrong speed/pitch and Gemini would not understand it
-          showError(`Your browser ignored the 16 kHz request (got ${inputAudioCtx.sampleRate} Hz). Use Chrome/Edge.`);
-        }
+        inputAudioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+        outputAudioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
 
-        // 2. Load the worklet from a Blob
+        if (inputAudioCtx.state === 'suspended') await inputAudioCtx.resume();
+        if (outputAudioCtx.state === 'suspended') await outputAudioCtx.resume();
+
         const blob = new Blob([pcmProcessorCode], { type: "application/javascript" });
         const workletUrl = URL.createObjectURL(blob);
         await inputAudioCtx.audioWorklet.addModule(workletUrl);
         URL.revokeObjectURL(workletUrl);
 
-        // 3. Microphone
         micStream = await navigator.mediaDevices.getUserMedia({
-          audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true }
+          audio: { channelCount: 1, sampleRate: 16000, echoCancellation: true, noiseSuppression: true }
         });
 
-        // 4. WebSocket
-        const socket = new WebSocket(url);
-        ws = socket;
+        ws = new WebSocket(url);
 
-        socket.onopen = () => {
-          if (socket !== ws) return;
+        ws.onopen = () => {
           isConnected = true;
-          setStatus("Live & Listening", true);
+          statusBadge.classList.add("connected");
+          statusText.innerText = "Live & Listening";
           toggleBtn.innerText = "Stop";
           toggleBtn.classList.add("active");
+
           startAudioWorkletStreaming();
         };
 
-        socket.onmessage = (event) => {
-          if (socket !== ws) return;
-          let data;
+        ws.onmessage = (event) => {
           try {
-            data = JSON.parse(event.data);
+            const data = JSON.parse(event.data);
+            if (data.type === "error") {
+              showError(data.message);
+              stopAll();
+            } else if (data.type === "audio_delta" && data.audio) {
+              playPcm24k(data.audio);
+            } else if (data.type === "interrupted") {
+              flushAudio();
+            }
           } catch (e) {
             console.warn("Parse error:", e);
-            return;
-          }
-          if (data.type === "error") {
-            showError(data.message);
-            stopAll();
-          } else if (data.type === "audio_delta" && data.audio) {
-            playPcm24k(data.audio);
-          } else if (data.type === "interrupted") {
-            flushAudio();
-          } else if (data.type === "transcript") {
-            addTranscript(data.role, data.text);
           }
         };
 
-        socket.onerror = () => {
-          if (socket !== ws) return;
-          showError(`WebSocket connection failed. Check that the backend is running at ${url}.`);
+        ws.onerror = () => {
+          showError(`WebSocket connection failed. Verify backend gateway on ${url}.`);
+          stopAll();
         };
 
-        socket.onclose = (e) => {
-          if (socket !== ws) return; // we closed it ourselves (Stop button) or it's stale
+        ws.onclose = (e) => {
           if (e.code === 1008) {
             showError("Access Denied (1008): GEMINI_API_KEY invalid or missing.");
-          } else if (e.code !== 1000 && e.code !== 1005 && errorBox.style.display === "none") {
-            showError(`WebSocket closed unexpectedly (Code: ${e.code}${e.reason ? ", " + e.reason : ""})`);
+          } else if (e.code !== 1000 && e.code !== 1005) {
+            showError(`WebSocket closed (Code: ${e.code})`);
           }
           stopAll();
         };
+
       } catch (err) {
-        showError(err.message || String(err));
+        showError(err.message || err);
         stopAll();
-      } finally {
-        isStarting = false;
-        toggleBtn.disabled = false;
       }
     }
 
     function startAudioWorkletStreaming() {
-      if (!inputAudioCtx || inputAudioCtx.state === "closed" || !micStream) return;
+      if (!inputAudioCtx || inputAudioCtx.state === 'closed') return;
 
-      micSource = inputAudioCtx.createMediaStreamSource(micStream);
+      const source = inputAudioCtx.createMediaStreamSource(micStream);
       workletNode = new AudioWorkletNode(inputAudioCtx, "pcm-processor");
 
       workletNode.port.onmessage = (e) => {
         if (!ws || ws.readyState !== WebSocket.OPEN) return;
 
+        let binary = '';
         const bytes = new Uint8Array(e.data);
-        let binary = "";
         for (let i = 0; i < bytes.byteLength; i++) {
           binary += String.fromCharCode(bytes[i]);
         }
-        ws.send(JSON.stringify({ type: "audio_input", audio: btoa(binary) }));
+        const base64Audio = btoa(binary);
+
+        ws.send(JSON.stringify({
+          type: "audio_input",
+          audio: base64Audio
+        }));
       };
 
-      micSource.connect(workletNode);
-      // Keep the worklet pulled by the graph without playing the mic back
+      source.connect(workletNode);
       const muteGain = inputAudioCtx.createGain();
       muteGain.gain.value = 0;
       workletNode.connect(muteGain);
@@ -348,13 +304,11 @@
     }
 
     function playPcm24k(base64Pcm) {
-      if (!outputAudioCtx || outputAudioCtx.state === "closed") return;
+      if (!outputAudioCtx || outputAudioCtx.state === 'closed') return;
 
       const binary = atob(base64Pcm);
-      const len = binary.length - (binary.length % 2); // Int16 needs an even byte count
-      if (len === 0) return;
-      const bytes = new Uint8Array(len);
-      for (let i = 0; i < len; i++) bytes[i] = binary.charCodeAt(i);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
 
       const int16 = new Int16Array(bytes.buffer);
       const float32 = new Float32Array(int16.length);
@@ -367,7 +321,8 @@
       src.buffer = buffer;
       src.connect(outputAudioCtx.destination);
 
-      const start = Math.max(outputAudioCtx.currentTime, scheduledAudioTime);
+      const now = outputAudioCtx.currentTime;
+      const start = Math.max(now, scheduledAudioTime);
       src.start(start);
       scheduledAudioTime = start + buffer.duration;
 
@@ -376,49 +331,42 @@
     }
 
     function flushAudio() {
-      activeSources.forEach((s) => {
+      activeSources.forEach(s => {
         try { s.stop(); } catch (_) {}
       });
       activeSources.clear();
-      if (outputAudioCtx && outputAudioCtx.state !== "closed") {
+      if (outputAudioCtx && outputAudioCtx.state !== 'closed') {
         scheduledAudioTime = outputAudioCtx.currentTime;
       }
     }
 
     function stopAll() {
+      const prevWs = ws;
+      ws = null;
       isConnected = false;
-      setStatus("Disconnected", false);
+
+      statusBadge.classList.remove("connected");
+      statusText.innerText = "Disconnected";
       toggleBtn.innerText = "Start";
       toggleBtn.classList.remove("active");
 
-      // Detach ws first so its onclose handler ignores our own close()
-      const socket = ws;
-      ws = null;
-      if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
-        try { socket.close(1000); } catch (_) {}
-      }
-
       if (workletNode) {
-        workletNode.port.onmessage = null;
-        try { workletNode.disconnect(); } catch (_) {}
+        workletNode.disconnect();
         workletNode = null;
       }
-      if (micSource) {
-        try { micSource.disconnect(); } catch (_) {}
-        micSource = null;
-      }
       if (micStream) {
-        micStream.getTracks().forEach((t) => t.stop());
+        micStream.getTracks().forEach(t => t.stop());
         micStream = null;
       }
-
-      flushAudio();
-      scheduledAudioTime = 0;
-
-      if (inputAudioCtx && inputAudioCtx.state !== "closed") inputAudioCtx.close();
-      if (outputAudioCtx && outputAudioCtx.state !== "closed") outputAudioCtx.close();
-      inputAudioCtx = null;
-      outputAudioCtx = null;
+      if (inputAudioCtx && inputAudioCtx.state !== 'closed') {
+        inputAudioCtx.close();
+      }
+      if (outputAudioCtx && outputAudioCtx.state !== 'closed') {
+        outputAudioCtx.close();
+      }
+      if (prevWs && prevWs.readyState === WebSocket.OPEN) {
+        prevWs.close(1000, "User stopped session");
+      }
     }
   </script>
 </body>

@@ -1,49 +1,42 @@
 services:
-  backend:
+  voice-crm-backend:
     build:
       context: ./backend
       dockerfile: Dockerfile
     container_name: voice-crm-backend
     restart: unless-stopped
-    ports:
-      - "8000:8000"
     environment:
       - GEMINI_API_KEY=${GEMINI_API_KEY}
-      - GEMINI_MODEL=${GEMINI_MODEL:-models/gemini-2.0-flash}
+      - GEMINI_MODEL=${GEMINI_MODEL:-models/gemini-3.8-live}
+    expose:
+      - "8000"
     networks:
-      - dokploy-network
-    labels:
-      - "traefik.enable=true"
-      # Rule: Intercept paths starting with /ws or /api under the domain
-      - "traefik.http.routers.crm-backend.rule=Host(`${APP_DOMAIN}`) && (PathPrefix(`/ws`) || PathPrefix(`/api`))"
-      - "traefik.http.routers.crm-backend.entrypoints=websecure"
-      - "traefik.http.routers.crm-backend.tls=true"
-      - "traefik.http.routers.crm-backend.tls.certresolver=letsencrypt"
-      - "traefik.http.routers.crm-backend.priority=100" # Higher priority ensures /ws hits backend
-      - "traefik.http.services.crm-backend.loadbalancer.server.port=8000"
+      - voice-net
 
-  frontend:
+  voice-crm-frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile
     container_name: voice-crm-frontend
     restart: unless-stopped
-    ports:
-      - "3000:80"
     depends_on:
-      - backend
+      - voice-crm-backend
+    expose:
+      - "80"
     networks:
+      - voice-net
       - dokploy-network
     labels:
       - "traefik.enable=true"
-      # Rule: Catch-all for the same domain
-      - "traefik.http.routers.crm-frontend.rule=Host(`${APP_DOMAIN}`)"
-      - "traefik.http.routers.crm-frontend.entrypoints=websecure"
-      - "traefik.http.routers.crm-frontend.tls=true"
-      - "traefik.http.routers.crm-frontend.tls.certresolver=letsencrypt"
-      - "traefik.http.routers.crm-frontend.priority=10" # Lower priority acts as default fallback
-      - "traefik.http.services.crm-frontend.loadbalancer.server.port=80"
+      - "traefik.docker.network=dokploy-network"
+      - "traefik.http.routers.voice-crm.rule=Host(`${APP_DOMAIN:-voice.flowbridgeadvisory.com}`)"
+      - "traefik.http.routers.voice-crm.entrypoints=websecure"
+      - "traefik.http.routers.voice-crm.tls=true"
+      - "traefik.http.routers.voice-crm.tls.certresolver=letsencrypt"
+      - "traefik.http.services.voice-crm.loadbalancer.server.port=80"
 
 networks:
-  dokploy-network:
+  voice-net:
     driver: bridge
+  dokploy-network:
+    external: true
