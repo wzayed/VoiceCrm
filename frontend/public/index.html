@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>FlowBridge Advisory | CRM Voice Agent</title>
+  <title>FlowBridge Advisory | CRM Voice Agent v2.1</title>
   <style>
     :root {
       --bg: #0f172a;
@@ -38,10 +38,10 @@
       display: flex;
       flex-direction: column;
       align-items: center;
-      gap: 18px;
+      gap: 16px;
     }
     h1 { font-size: 1.45rem; margin: 0; font-weight: 600; }
-    .subtitle { font-size: 0.8rem; color: var(--muted); margin-top: -12px; }
+    .subtitle { font-size: 0.8rem; color: var(--muted); margin-top: -10px; }
     .status-badge {
       font-size: 0.85rem;
       padding: 4px 12px;
@@ -82,6 +82,19 @@
       background: var(--danger);
       color: #fff;
       box-shadow: 0 0 25px rgba(239, 68, 68, 0.5);
+    }
+    .meter-wrap {
+      width: 100%;
+      height: 6px;
+      background: rgba(15, 23, 42, 0.8);
+      border-radius: 999px;
+      overflow: hidden;
+    }
+    .meter-bar {
+      height: 100%;
+      width: 0%;
+      background: var(--success);
+      transition: width 0.08s ease;
     }
     .config-field { width: 100%; display: flex; flex-direction: column; gap: 6px; }
     .config-field label { font-size: 0.75rem; color: var(--muted); text-transform: uppercase; }
@@ -130,7 +143,7 @@
 <body>
 
   <div class="container">
-    <h1>CRM Voice Assistant</h1>
+    <h1>CRM Voice Assistant <span style="font-size:0.75rem; color:#38bdf8;">v2.1</span></h1>
     <div class="subtitle">FlowBridge Advisory — Friction to Flow</div>
     
     <div id="statusBadge" class="status-badge">
@@ -148,7 +161,14 @@
     <button id="toggleBtn" class="mic-btn">Start</button>
 
     <div class="config-field">
-      <label>Live Conversation Transcript</label>
+      <label>Mic Input Level (<span id="chunkCounter">0</span> chunks sent)</label>
+      <div class="meter-wrap">
+        <div id="meterBar" class="meter-bar"></div>
+      </div>
+    </div>
+
+    <div class="config-field">
+      <label>Live Session Log & Tool Execution</label>
       <div id="transcriptBox" class="transcript-box">
         <div style="color: var(--muted); font-size: 0.8rem;">Tap Start and speak in Arabic or English...</div>
       </div>
@@ -162,6 +182,8 @@
     const statusText = document.getElementById("statusText");
     const errorBox = document.getElementById("errorBox");
     const transcriptBox = document.getElementById("transcriptBox");
+    const meterBar = document.getElementById("meterBar");
+    const chunkCounter = document.getElementById("chunkCounter");
 
     const isSecure = window.location.protocol === "https:";
     const wsProto = isSecure ? "wss:" : "ws:";
@@ -178,6 +200,7 @@
     let processorNode = null;
     let isConnected = false;
     let scheduledAudioTime = 0;
+    let sentChunks = 0;
     const activeSources = new Set();
 
     function appendTranscript(role, text) {
@@ -220,21 +243,23 @@
     async function startAll() {
       const url = wsUrlInput.value.trim();
       statusText.innerText = "Requesting mic & connecting...";
+      sentChunks = 0;
+      chunkCounter.innerText = "0";
 
       try {
-        // 1. Request microphone first
+        // 1. Request microphone access
         micStream = await navigator.mediaDevices.getUserMedia({
           audio: { channelCount: 1, sampleRate: 16000, echoCancellation: true, noiseSuppression: true }
         });
 
-        // 2. Initialize AudioContexts on user gesture
+        // 2. Initialize AudioContexts on user click
         inputAudioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
         outputAudioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
 
         if (inputAudioCtx.state === "suspended") await inputAudioCtx.resume();
         if (outputAudioCtx.state === "suspended") await outputAudioCtx.resume();
 
-        // 3. Connect WebSocket
+        // 3. Open WebSocket connection
         ws = new WebSocket(url);
 
         ws.onopen = () => {
@@ -244,7 +269,7 @@
           toggleBtn.innerText = "Stop";
           toggleBtn.classList.add("active");
           transcriptBox.innerHTML = "";
-          appendTranscript("assistant", "Connected. Listening...");
+          appendTranscript("assistant", "Connected (v2.1). Speak now in Arabic or English...");
 
           startMicCapture();
         };
@@ -299,10 +324,18 @@
 
         const inputData = e.inputBuffer.getChannelData(0);
         const pcm16 = new Int16Array(inputData.length);
+        let sumSq = 0;
+
         for (let i = 0; i < inputData.length; i++) {
           const s = Math.max(-1, Math.min(1, inputData[i]));
+          sumSq += s * s;
           pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
         }
+
+        // Update visual mic meter
+        const rms = Math.sqrt(sumSq / inputData.length);
+        const levelPct = Math.min(100, Math.round(rms * 400));
+        meterBar.style.width = `${levelPct}%`;
 
         const bytes = new Uint8Array(pcm16.buffer);
         let binary = "";
@@ -314,6 +347,11 @@
           type: "audio_input",
           audio: btoa(binary)
         }));
+
+        sentChunks++;
+        if (sentChunks % 10 === 0) {
+          chunkCounter.innerText = String(sentChunks);
+        }
       };
 
       source.connect(processorNode);
@@ -370,6 +408,7 @@
       statusText.innerText = "Disconnected";
       toggleBtn.innerText = "Start";
       toggleBtn.classList.remove("active");
+      meterBar.style.width = "0%";
 
       if (processorNode) {
         processorNode.disconnect();

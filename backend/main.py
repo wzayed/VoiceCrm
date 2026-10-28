@@ -6,10 +6,10 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 import websockets
 from langchain_core.tools import tool
 
-app = FastAPI(title="FlowBridge Bilingual Voice CRM Gateway")
+app = FastAPI(title="FlowBridge Bilingual Voice CRM Gateway v2.1")
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-MODEL_NAME = os.getenv("GEMINI_MODEL", "models/gemini-3.8-live")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
+MODEL_NAME = os.getenv("GEMINI_MODEL", "models/gemini-3.8-live").strip()
 
 if not MODEL_NAME.startswith("models/"):
     MODEL_NAME = f"models/{MODEL_NAME}"
@@ -22,7 +22,7 @@ GEMINI_WS_URL = (
 
 @app.get("/health")
 async def health_check():
-    return {"status": "ok", "model": MODEL_NAME}
+    return {"status": "ok", "version": "2.1", "model": MODEL_NAME}
 
 # ---------------------------------------------------------------------------
 # Bilingual In-Memory CRM Database
@@ -66,9 +66,6 @@ CRM_DATABASE = [
     }
 ]
 
-# ---------------------------------------------------------------------------
-# LangChain Tools
-# ---------------------------------------------------------------------------
 @tool
 def crm_search_customer(search_term: str) -> str:
     """Searches the CRM database in Arabic or English using company name or contact name."""
@@ -135,6 +132,7 @@ gemini_tools = [
 ]
 
 def build_setup_message() -> dict:
+    # Keep strictly to the schema that succeeded on your local machine
     return {
         "setup": {
             "model": MODEL_NAME,
@@ -148,15 +146,12 @@ def build_setup_message() -> dict:
                     }
                 }
             },
-            # Enable real-time text transcripts alongside audio
-            "inputAudioTranscription": {},
-            "outputAudioTranscription": {},
             "systemInstruction": {
                 "parts": [
                     {
                         "text": (
                             "You are an executive bilingual CRM voice assistant for FlowBridge Advisory, "
-                            "fluent in Arabic and English. Immediately reply in the exact language spoken by the user. "
+                            "fluent in Arabic and English. Immediately reply out loud in the exact language spoken by the user. "
                             "Keep spoken answers concise and natural (1 to 2 sentences). "
                             "Always use your tools to look up or update CRM deals when asked."
                         )
@@ -167,11 +162,10 @@ def build_setup_message() -> dict:
         }
     }
 
-
 @app.websocket("/ws/voice-crm")
 async def voice_crm_proxy(client_ws: WebSocket):
     await client_ws.accept()
-    print(f"\n[INFO] Browser connected. Connecting upstream to {MODEL_NAME}...")
+    print(f"\n[INFO] Browser connected (v2.1). Connecting upstream to {MODEL_NAME}...")
 
     if not GEMINI_API_KEY:
         await client_ws.send_text(json.dumps({
@@ -192,23 +186,21 @@ async def voice_crm_proxy(client_ws: WebSocket):
             setup_ack = await gemini_ws.recv()
             print(f"[INFO] Handshake response: {setup_ack}")
 
-            # Notify browser that Gemini handshake is ready
-            await client_ws.send_text(json.dumps({"type": "ready"}))
-
             async def client_to_gemini():
                 chunk_count = 0
                 try:
                     while True:
                         message = await client_ws.receive()
-                        if message.get("type") == "websocket.disconnect":
-                            print(f"[INFO] Browser disconnected cleanly (total chunks sent: {chunk_count}).")
+                        msg_type = message.get("type")
+
+                        if msg_type == "websocket.disconnect":
+                            print(f"[INFO] Browser sent disconnect (code={message.get('code')}, chunks={chunk_count}).")
                             break
 
                         b64_audio = None
                         if "text" in message and message["text"]:
                             try:
                                 msg = json.loads(message["text"])
-                                # Support both {"type": "audio_input", "audio": "..."} and {"audio": "..."} or {"data": "..."}
                                 b64_audio = msg.get("audio") or msg.get("data")
                             except json.JSONDecodeError:
                                 continue
@@ -217,7 +209,7 @@ async def voice_crm_proxy(client_ws: WebSocket):
 
                         if b64_audio:
                             chunk_count += 1
-                            if chunk_count % 100 == 0:
+                            if chunk_count == 1 or chunk_count % 100 == 0:
                                 print(f"[INFO] Mic chunks forwarded to Gemini: {chunk_count}")
 
                             audio_msg = {
@@ -232,12 +224,13 @@ async def voice_crm_proxy(client_ws: WebSocket):
                             }
                             await gemini_ws.send(json.dumps(audio_msg))
 
-                except WebSocketDisconnect:
-                    print(f"[INFO] Client WebSocket disconnected (total chunks sent: {chunk_count}).")
+                except WebSocketDisconnect as wsd:
+                    print(f"[INFO] Client WebSocketDisconnect (code={wsd.code}, chunks={chunk_count}).")
                 except Exception as ex:
-                    print(f"[DEBUG] client_to_gemini error: {type(ex).__name__}: {ex}")
+                    print(f"[ERROR] client_to_gemini error: {type(ex).__name__}: {ex}")
 
             async def gemini_to_client():
+                audio_out_count = 0
                 try:
                     async for raw_msg in gemini_ws:
                         resp = json.loads(raw_msg)
@@ -252,25 +245,6 @@ async def voice_crm_proxy(client_ws: WebSocket):
 
                         server_content = resp.get("serverContent")
                         if server_content:
-                            # 1. Forward User Input Transcription
-                            input_tx = server_content.get("inputTranscription")
-                            if input_tx and input_tx.get("text"):
-                                await client_ws.send_text(json.dumps({
-                                    "type": "transcript",
-                                    "role": "user",
-                                    "text": input_tx["text"]
-                                }))
-
-                            # 2. Forward Gemini Output Transcription
-                            output_tx = server_content.get("outputTranscription")
-                            if output_tx and output_tx.get("text"):
-                                await client_ws.send_text(json.dumps({
-                                    "type": "transcript",
-                                    "role": "assistant",
-                                    "text": output_tx["text"]
-                                }))
-
-                            # 3. Forward Audio Chunks & Any Text Parts
                             model_turn = server_content.get("modelTurn")
                             if model_turn:
                                 for part in model_turn.get("parts", []):
@@ -282,10 +256,16 @@ async def voice_crm_proxy(client_ws: WebSocket):
                                         }))
                                     inline_data = part.get("inlineData")
                                     if inline_data and "data" in inline_data:
+                                        audio_out_count += 1
+                                        if audio_out_count == 1 or audio_out_count % 25 == 0:
+                                            print(f"[INFO] Gemini audio chunks sent to browser: {audio_out_count}")
                                         await client_ws.send_text(json.dumps({
                                             "type": "audio_delta",
                                             "audio": inline_data["data"]
                                         }))
+
+                            if server_content.get("turnComplete"):
+                                print("[INFO] Gemini turnComplete.")
 
                             if server_content.get("interrupted"):
                                 await client_ws.send_text(json.dumps({"type": "interrupted"}))
@@ -323,8 +303,10 @@ async def voice_crm_proxy(client_ws: WebSocket):
                             await gemini_ws.send(json.dumps({
                                 "toolResponse": {"functionResponses": function_responses}
                             }))
+                except websockets.exceptions.ConnectionClosed as cc:
+                    print(f"[WARN] Gemini upstream closed connection: code={cc.code}, reason={cc.reason}")
                 except Exception as ex:
-                    print(f"[DEBUG] gemini_to_client closed: {type(ex).__name__}: {ex}")
+                    print(f"[ERROR] gemini_to_client error: {type(ex).__name__}: {ex}")
 
             done, pending = await asyncio.wait(
                 [asyncio.create_task(client_to_gemini()), asyncio.create_task(gemini_to_client())],
