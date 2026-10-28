@@ -148,6 +148,9 @@ def build_setup_message() -> dict:
                     }
                 }
             },
+            # Enable real-time text transcripts alongside audio
+            "inputAudioTranscription": {},
+            "outputAudioTranscription": {},
             "systemInstruction": {
                 "parts": [
                     {
@@ -163,6 +166,7 @@ def build_setup_message() -> dict:
             "tools": gemini_tools
         }
     }
+
 
 @app.websocket("/ws/voice-crm")
 async def voice_crm_proxy(client_ws: WebSocket):
@@ -188,34 +192,34 @@ async def voice_crm_proxy(client_ws: WebSocket):
             setup_ack = await gemini_ws.recv()
             print(f"[INFO] Handshake response: {setup_ack}")
 
+            # Notify browser that Gemini handshake is ready
+            await client_ws.send_text(json.dumps({"type": "ready"}))
+
             async def client_to_gemini():
+                chunk_count = 0
                 try:
                     while True:
                         message = await client_ws.receive()
                         if message.get("type") == "websocket.disconnect":
-                            print("[INFO] Browser disconnected cleanly.")
+                            print(f"[INFO] Browser disconnected cleanly (total chunks sent: {chunk_count}).")
                             break
 
+                        b64_audio = None
                         if "text" in message and message["text"]:
                             try:
                                 msg = json.loads(message["text"])
-                                if msg.get("type") == "audio_input" and msg.get("audio"):
-                                    audio_msg = {
-                                        "realtimeInput": {
-                                            "mediaChunks": [
-                                                {
-                                                    "mimeType": "audio/pcm;rate=16000",
-                                                    "data": msg["audio"]
-                                                }
-                                            ]
-                                        }
-                                    }
-                                    await gemini_ws.send(json.dumps(audio_msg))
+                                # Support both {"type": "audio_input", "audio": "..."} and {"audio": "..."} or {"data": "..."}
+                                b64_audio = msg.get("audio") or msg.get("data")
                             except json.JSONDecodeError:
                                 continue
-
                         elif "bytes" in message and message["bytes"]:
                             b64_audio = base64.b64encode(message["bytes"]).decode("utf-8")
+
+                        if b64_audio:
+                            chunk_count += 1
+                            if chunk_count % 100 == 0:
+                                print(f"[INFO] Mic chunks forwarded to Gemini: {chunk_count}")
+
                             audio_msg = {
                                 "realtimeInput": {
                                     "mediaChunks": [
@@ -229,9 +233,9 @@ async def voice_crm_proxy(client_ws: WebSocket):
                             await gemini_ws.send(json.dumps(audio_msg))
 
                 except WebSocketDisconnect:
-                    print("[INFO] Client WebSocket disconnected.")
+                    print(f"[INFO] Client WebSocket disconnected (total chunks sent: {chunk_count}).")
                 except Exception as ex:
-                    print(f"[DEBUG] client_to_gemini closed: {type(ex).__name__}: {ex}")
+                    print(f"[DEBUG] client_to_gemini error: {type(ex).__name__}: {ex}")
 
             async def gemini_to_client():
                 try:
@@ -240,13 +244,42 @@ async def voice_crm_proxy(client_ws: WebSocket):
 
                         if "error" in resp:
                             print(f"[ERROR] Gemini upstream error: {resp['error']}")
+                            await client_ws.send_text(json.dumps({
+                                "type": "error",
+                                "message": str(resp["error"])
+                            }))
                             continue
 
                         server_content = resp.get("serverContent")
                         if server_content:
+                            # 1. Forward User Input Transcription
+                            input_tx = server_content.get("inputTranscription")
+                            if input_tx and input_tx.get("text"):
+                                await client_ws.send_text(json.dumps({
+                                    "type": "transcript",
+                                    "role": "user",
+                                    "text": input_tx["text"]
+                                }))
+
+                            # 2. Forward Gemini Output Transcription
+                            output_tx = server_content.get("outputTranscription")
+                            if output_tx and output_tx.get("text"):
+                                await client_ws.send_text(json.dumps({
+                                    "type": "transcript",
+                                    "role": "assistant",
+                                    "text": output_tx["text"]
+                                }))
+
+                            # 3. Forward Audio Chunks & Any Text Parts
                             model_turn = server_content.get("modelTurn")
                             if model_turn:
                                 for part in model_turn.get("parts", []):
+                                    if "text" in part and part["text"]:
+                                        await client_ws.send_text(json.dumps({
+                                            "type": "transcript",
+                                            "role": "assistant",
+                                            "text": part["text"]
+                                        }))
                                     inline_data = part.get("inlineData")
                                     if inline_data and "data" in inline_data:
                                         await client_ws.send_text(json.dumps({
@@ -275,6 +308,12 @@ async def voice_crm_proxy(client_ws: WebSocket):
                                 else:
                                     res_obj = {"error": f"Tool {f_name} not found"}
 
+                                await client_ws.send_text(json.dumps({
+                                    "type": "transcript",
+                                    "role": "tool",
+                                    "text": f"[CRM Tool: {f_name}] -> {json.dumps(res_obj, ensure_ascii=False)}"
+                                }))
+
                                 function_responses.append({
                                     "id": c_id,
                                     "name": f_name,
@@ -287,7 +326,6 @@ async def voice_crm_proxy(client_ws: WebSocket):
                 except Exception as ex:
                     print(f"[DEBUG] gemini_to_client closed: {type(ex).__name__}: {ex}")
 
-            # Run both loops; as soon as the browser disconnects or Gemini closes, cancel the other task cleanly
             done, pending = await asyncio.wait(
                 [asyncio.create_task(client_to_gemini()), asyncio.create_task(gemini_to_client())],
                 return_when=asyncio.FIRST_COMPLETED
