@@ -25,8 +25,8 @@ GEMINI_WS_URL = (
 )
 
 GREETING_TEXT = (
-    "Hello! Briefly greet me in one short sentence and ask how you can help "
-    "with FlowBridge CRM today."
+    "مرجبا - قم بتحيتى ثم إسألنى كيف أساعدك فى إدارة عملائك أو الاستفسار عن  سجلاتهم. "
+    "مع FlowBridge CRM today."
 )
 
 
@@ -80,11 +80,17 @@ CRM_DATABASE = [
 
 @tool
 def crm_search_customer(search_term: str) -> str:
-    """Searches the CRM database in Arabic or English using company name or contact name."""
+    """Searches the CRM database in Arabic or English using company name, contact name, stage, owner, or last_note."""
     term = search_term.strip().lower()
     matches = []
     for entry in CRM_DATABASE:
-        searchable_text = f"{entry['company']} {entry['contact']} {entry['owner']}".lower()
+        searchable_text = " ".join([
+            entry["company"],
+            entry["contact"],
+            entry["stage"],
+            entry["owner"],
+            entry["last_note"]
+        ]).lower()
         if term in searchable_text:
             matches.append(entry)
 
@@ -111,13 +117,13 @@ gemini_tools = [
         "functionDeclarations": [
             {
                 "name": "crm_search_customer",
-                "description": "Searches the CRM database in Arabic or English using company name or contact name.",
+                "description": "Searches the CRM database in Arabic or English using company name, contact name, stage, owner, or last_note.",
                 "parameters": {
                     "type": "OBJECT",
                     "properties": {
                         "search_term": {
                             "type": "STRING",
-                            "description": "Company name or contact person name to query.",
+                            "description": "Company name, contact person name , stage, owner, or last_note to query.",
                         }
                     },
                     "required": ["search_term"],
