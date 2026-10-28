@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>FlowBridge Advisory | CRM Voice Agent v2.1</title>
+  <title>FlowBridge Advisory | CRM Voice Agent v2.2</title>
   <style>
     :root {
       --bg: #0f172a;
@@ -97,7 +97,7 @@
       transition: width 0.08s ease;
     }
     .config-field { width: 100%; display: flex; flex-direction: column; gap: 6px; }
-    .config-field label { font-size: 0.75rem; color: var(--muted); text-transform: uppercase; }
+    .config-field label { font-size: 0.75rem; color: var(--muted); text-transform: uppercase; display: flex; justify-content: space-between; }
     .config-field input {
       background: rgba(15, 23, 42, 0.6);
       border: 1px solid rgba(255, 255, 255, 0.1);
@@ -124,6 +124,7 @@
     }
     .msg-user { color: #38bdf8; align-self: flex-end; text-align: right; }
     .msg-assistant { color: #f8fafc; align-self: flex-start; }
+    .msg-thought { color: #94a3b8; font-size: 0.8rem; font-style: italic; }
     .msg-tool { color: #facc15; font-size: 0.8rem; font-family: monospace; }
     #errorBox {
       display: none;
@@ -143,7 +144,7 @@
 <body>
 
   <div class="container">
-    <h1>CRM Voice Assistant <span style="font-size:0.75rem; color:#38bdf8;">v2.1</span></h1>
+    <h1>CRM Voice Assistant <span style="font-size:0.75rem; color:#38bdf8;">v2.2</span></h1>
     <div class="subtitle">FlowBridge Advisory — Friction to Flow</div>
     
     <div id="statusBadge" class="status-badge">
@@ -161,7 +162,10 @@
     <button id="toggleBtn" class="mic-btn">Start</button>
 
     <div class="config-field">
-      <label>Mic Input Level (<span id="chunkCounter">0</span> chunks sent)</label>
+      <label>
+        <span>Mic Input (<span id="chunkCounter">0</span> sent)</span>
+        <span>Gemini Audio (<span id="rxCounter" style="color:#22c55e;">0</span> received)</span>
+      </label>
       <div class="meter-wrap">
         <div id="meterBar" class="meter-bar"></div>
       </div>
@@ -184,6 +188,7 @@
     const transcriptBox = document.getElementById("transcriptBox");
     const meterBar = document.getElementById("meterBar");
     const chunkCounter = document.getElementById("chunkCounter");
+    const rxCounter = document.getElementById("rxCounter");
 
     const isSecure = window.location.protocol === "https:";
     const wsProto = isSecure ? "wss:" : "ws:";
@@ -201,6 +206,7 @@
     let isConnected = false;
     let scheduledAudioTime = 0;
     let sentChunks = 0;
+    let receivedChunks = 0;
     const activeSources = new Set();
 
     function appendTranscript(role, text) {
@@ -212,6 +218,9 @@
       } else if (role === "tool") {
         div.className = "msg-tool";
         div.innerText = text;
+      } else if (role === "thought") {
+        div.className = "msg-thought";
+        div.innerText = `[Thinking]: ${text}`;
       } else {
         div.className = "msg-assistant";
         div.innerText = `Agent: ${text}`;
@@ -231,6 +240,28 @@
       errorBox.innerText = "";
     }
 
+    // Downsample arbitrary hardware rate (e.g. 48000 Hz) to clean 16000 Hz Float32Array
+    function downsampleTo16k(float32Buffer, inputSampleRate) {
+      if (inputSampleRate === 16000) return float32Buffer;
+      const ratio = inputSampleRate / 16000;
+      const newLength = Math.round(float32Buffer.length / ratio);
+      const result = new Float32Array(newLength);
+      let offsetResult = 0;
+      let offsetBuffer = 0;
+      while (offsetResult < result.length) {
+        const nextOffsetBuffer = Math.round((offsetResult + 1) * ratio);
+        let accum = 0, count = 0;
+        for (let i = offsetBuffer; i < nextOffsetBuffer && i < float32Buffer.length; i++) {
+          accum += float32Buffer[i];
+          count++;
+        }
+        result[offsetResult] = count > 0 ? accum / count : 0;
+        offsetResult++;
+        offsetBuffer = nextOffsetBuffer;
+      }
+      return result;
+    }
+
     toggleBtn.onclick = async () => {
       clearError();
       if (!isConnected) {
@@ -244,22 +275,21 @@
       const url = wsUrlInput.value.trim();
       statusText.innerText = "Requesting mic & connecting...";
       sentChunks = 0;
+      receivedChunks = 0;
       chunkCounter.innerText = "0";
+      rxCounter.innerText = "0";
 
       try {
-        // 1. Request microphone access
         micStream = await navigator.mediaDevices.getUserMedia({
-          audio: { channelCount: 1, sampleRate: 16000, echoCancellation: true, noiseSuppression: true }
+          audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true }
         });
 
-        // 2. Initialize AudioContexts on user click
-        inputAudioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+        inputAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
         outputAudioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
 
         if (inputAudioCtx.state === "suspended") await inputAudioCtx.resume();
         if (outputAudioCtx.state === "suspended") await outputAudioCtx.resume();
 
-        // 3. Open WebSocket connection
         ws = new WebSocket(url);
 
         ws.onopen = () => {
@@ -269,7 +299,7 @@
           toggleBtn.innerText = "Stop";
           toggleBtn.classList.add("active");
           transcriptBox.innerHTML = "";
-          appendTranscript("assistant", "Connected (v2.1). Speak now in Arabic or English...");
+          appendTranscript("assistant", `Connected (v2.2 | Mic Hardware Rate: ${inputAudioCtx.sampleRate}Hz -> 16000Hz). Waiting for greeting...`);
 
           startMicCapture();
         };
@@ -281,9 +311,13 @@
               showError(data.message);
               stopAll();
             } else if (data.type === "audio_delta" && data.audio) {
+              receivedChunks++;
+              rxCounter.innerText = String(receivedChunks);
               playPcm24k(data.audio);
             } else if (data.type === "transcript" && data.text) {
               appendTranscript(data.role, data.text);
+            } else if (data.type === "turn_complete") {
+              appendTranscript("assistant", `✓ Audio response complete (${data.audioChunks} packets played).`);
             } else if (data.type === "interrupted") {
               flushAudio();
             }
@@ -316,26 +350,26 @@
     function startMicCapture() {
       if (!inputAudioCtx || inputAudioCtx.state === "closed") return;
 
+      const hwRate = inputAudioCtx.sampleRate;
       const source = inputAudioCtx.createMediaStreamSource(micStream);
-      processorNode = inputAudioCtx.createScriptProcessor(2048, 1, 1);
+      processorNode = inputAudioCtx.createScriptProcessor(4096, 1, 1);
 
       processorNode.onaudioprocess = (e) => {
         if (!ws || ws.readyState !== WebSocket.OPEN) return;
 
-        const inputData = e.inputBuffer.getChannelData(0);
-        const pcm16 = new Int16Array(inputData.length);
+        const rawData = e.inputBuffer.getChannelData(0);
         let sumSq = 0;
+        for (let i = 0; i < rawData.length; i++) sumSq += rawData[i] * rawData[i];
+        const rms = Math.sqrt(sumSq / rawData.length);
+        meterBar.style.width = `${Math.min(100, Math.round(rms * 400))}%`;
 
-        for (let i = 0; i < inputData.length; i++) {
-          const s = Math.max(-1, Math.min(1, inputData[i]));
-          sumSq += s * s;
+        // Downsample cleanly to 16000 Hz
+        const resampled = downsampleTo16k(rawData, hwRate);
+        const pcm16 = new Int16Array(resampled.length);
+        for (let i = 0; i < resampled.length; i++) {
+          const s = Math.max(-1, Math.min(1, resampled[i]));
           pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
         }
-
-        // Update visual mic meter
-        const rms = Math.sqrt(sumSq / inputData.length);
-        const levelPct = Math.min(100, Math.round(rms * 400));
-        meterBar.style.width = `${levelPct}%`;
 
         const bytes = new Uint8Array(pcm16.buffer);
         let binary = "";
@@ -345,11 +379,12 @@
 
         ws.send(JSON.stringify({
           type: "audio_input",
+          sampleRate: 16000,
           audio: btoa(binary)
         }));
 
         sentChunks++;
-        if (sentChunks % 10 === 0) {
+        if (sentChunks % 5 === 0) {
           chunkCounter.innerText = String(sentChunks);
         }
       };
